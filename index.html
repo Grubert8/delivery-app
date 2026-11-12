@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Доставщик - Умный Навигатор</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        #map { height: 45vh; width: 100%; z-index: 1; }
+        ::-webkit-scrollbar { width: 0px; background: transparent; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-100 font-sans h-screen flex flex-col overflow-hidden">
+
+    <!-- Экран регистрации доставщика -->
+    <div id="auth-screen" class="fixed inset-0 z-50 bg-gray-900 flex flex-col items-center justify-center p-6 hidden">
+        <div class="bg-gray-800 p-6 rounded-xl shadow-2xl w-full max-w-sm border border-gray-700">
+            <h2 class="text-xl font-bold text-green-400 mb-2 text-center">Регистрация доставщика</h2>
+            <p class="text-xs text-gray-400 mb-6 text-center">Введите ваши данные перед началом смены</p>
+            
+            <input type="text" id="reg-name" placeholder="Ваше ФИО (напр. Рахимов Б.)" class="w-full bg-gray-700 p-3 rounded mb-3 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-green-500">
+            <input type="tel" id="reg-phone" placeholder="Номер телефона (+992...)" class="w-full bg-gray-700 p-3 rounded mb-6 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-green-500">
+            
+            <button onclick="saveDriverData()" class="w-full bg-green-600 hover:bg-green-500 p-3 rounded font-bold text-white transition">Сохранить и войти</button>
+        </div>
+    </div>
+
+    <!-- Стартовый экран загрузки файла -->
+    <div id="upload-screen" class="absolute inset-0 z-40 bg-gray-900 flex flex-col items-center justify-center p-6 hidden">
+        <div class="text-right w-full max-w-sm mb-4">
+            <span id="driver-badge" class="text-xs text-gray-400"></span>
+            <button onclick="openAuthScreen()" class="text-xs text-purple-400 ml-2 underline">Изменить</button>
+        </div>
+        <h1 class="text-2xl font-bold text-green-400 mb-2 text-center">Навигатор Доставщика</h1>
+        <p class="text-gray-400 text-center mb-6 text-sm">Загрузите JSON-файл маршрута от супервайзера</p>
+        
+        <label class="bg-purple-600 hover:bg-purple-500 text-white font-bold py-4 px-8 rounded-lg shadow-lg cursor-pointer transition w-full text-center max-w-sm">
+            📂 Выбрать файл маршрута
+            <input type="file" id="file-input" accept=".json" class="hidden" onchange="handleFileUpload(event)">
+        </label>
+    </div>
+
+    <!-- Основной интерфейс навигатора -->
+    <div id="main-app" class="hidden flex-1 flex flex-col">
+        <!-- Шапка с переключателем режимов -->
+        <header class="bg-gray-800 p-3 shadow-md z-10 flex flex-col gap-2">
+            <div class="flex justify-between items-center">
+                <div>
+                    <h1 class="text-sm font-bold text-green-400" id="route-title">Маршрут</h1>
+                    <span id="sup-info" class="text-xs text-gray-400"></span>
+                </div>
+                <div class="flex gap-2">
+                    <button onclick="setMode('auto')" id="btn-mode-auto" class="bg-blue-600 px-3 py-1 rounded text-xs font-bold shadow transition text-white">Автопилот</button>
+                    <button onclick="setMode('free')" id="btn-mode-free" class="bg-gray-700 px-3 py-1 rounded text-xs font-bold shadow transition text-gray-400">Свободный</button>
+                </div>
+            </div>
+            <div id="mode-hint" class="text-xs text-gray-400">Режим: Очередь по ближайшим точкам.</div>
+        </header>
+
+        <!-- Карта -->
+        <div id="map"></div>
+
+        <!-- Нижняя панель: список заказов -->
+        <div class="flex-1 bg-gray-900 p-4 overflow-y-auto" id="orders-list"></div>
+    </div>
+
+    <script>
+        let driver = JSON.parse(localStorage.getItem('driverProfile')) || null;
+        let map, polyline;
+        let orders = [];
+        let supervisorMeta = null;
+        let markers = {};
+        let driverMarker = null;
+        let watchId = null;
+        let currentDriverPos = null;
+        let navMode = 'auto';
+        let targetShopId = null;
+
+        function checkAuth() {
+            if (!driver || !driver.name || !driver.phone) {
+                document.getElementById('auth-screen').classList.remove('hidden');
+                document.getElementById('upload-screen').classList.add('hidden');
+            } else {
+                document.getElementById('auth-screen').classList.add('hidden');
+                document.getElementById('upload-screen').classList.remove('hidden');
+                document.getElementById('driver-badge').innerText = `Водитель: ${driver.name} (${driver.phone})`;
+            }
+        }
+
+        function saveDriverData() {
+            const name = document.getElementById('reg-name').value.trim();
+            const phone = document.getElementById('reg-phone').value.trim();
+
+            if (!name || !phone) {
+                alert("Пожалуйста, заполните ФИО и номер телефона!");
+                return;
+            }
+
+            driver = { name, phone };
+            localStorage.setItem('driverProfile', JSON.stringify(driver));
+            checkAuth();
+        }
+
+        function openAuthScreen() {
+            document.getElementById('reg-name').value = driver ? driver.name : '';
+            document.getElementById('reg-phone').value = driver ? driver.phone : '';
+            document.getElementById('auth-screen').classList.remove('hidden');
+        }
+
+        function handleFileUpload(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const rawData = JSON.parse(e.target.result);
+                    
+                    if (rawData.orders && rawData.supervisor) {
+                        orders = rawData.orders;
+                        supervisorMeta = rawData.supervisor;
+                    } else if (Array.isArray(rawData)) {
+                        orders = rawData;
+                        supervisorMeta = { name: "Не указан", phone: "-" };
+                    } else {
+                        throw new Error("Неверный формат");
+                    }
+
+                    if (!orders || orders.length === 0) throw new Error("Пустой файл");
+                    
+                    orders = orders.map(o => ({ ...o, isDelivered: false }));
+                    
+                    document.getElementById('upload-screen').classList.add('hidden');
+                    document.getElementById('main-app').classList.remove('hidden');
+                    
+                    document.getElementById('route-title').innerText = `Маршрут (${orders.length} точек)`;
+                    document.getElementById('sup-info').innerText = `Собрал: ${supervisorMeta.name} (${supervisorMeta.phone})`;
+
+                    initMap();
+                    startGPSWatcher();
+                    renderOrders();
+                } catch (err) {
+                    alert("Ошибка чтения файла! Убедитесь, что это файл маршрута.");
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        function initMap() {
+            const startCoord = orders[0].coordinates;
+            map = L.map('map').setView(startCoord, 14);
+
+            L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                attribution: '&copy; OpenStreetMap, CartoDB',
+                maxZoom: 19
+            }).addTo(map);
+
+            orders.forEach((order) => {
+                const marker = L.circleMarker(order.coordinates, {
+                    radius: 9,
+                    fillColor: "#3b82f6",
+                    color: "#fff",
+                    weight: 2,
+                    opacity: 1,
+                    fillOpacity: 0.9
+                }).addTo(map);
+                
+                marker.bindPopup(`<b>${order.shopName}</b>`);
+                
+                marker.on('click', () => {
+                    if (navMode === 'free') {
+                        selectTargetShop(order.id);
+                    } else {
+                        highlightOrderCard(order.id);
+                    }
+                });
+
+                markers[order.id] = marker;
+            });
+        }
+
+        function startGPSWatcher() {
+            if (!navigator.geolocation) {
+                alert("GPS не поддерживается");
+                return;
+            }
+
+            watchId = navigator.geolocation.watchPosition(
+                (position) => {
+                    currentDriverPos = [position.coords.latitude, position.coords.longitude];
+
+                    if (!driverMarker) {
+                        driverMarker = L.circleMarker(currentDriverPos, {
+                            radius: 10,
+                            fillColor: "#eab308",
+                            color: "#fff",
+                            weight: 3,
+                            fillOpacity: 1
+                        }).addTo(map).bindPopup("<b>Вы здесь (Ваша машина)</b>");
+                    } else {
+                        driverMarker.setLatLng(currentDriverPos);
+                    }
+                    updateRouteLine();
+                },
+                (error) => { console.warn("GPS error:", error); },
+                { enableHighAccuracy: true, maximumAge: 2000, timeout: 5000 }
+            );
+        }
+
+        function setMode(mode) {
+            navMode = mode;
+            const btnAuto = document.getElementById('btn-mode-auto');
+            const btnFree = document.getElementById('btn-mode-free');
+            const hint = document.getElementById('mode-hint');
+
+            if (mode === 'auto') {
+                btnAuto.className = "bg-blue-600 px-3 py-1 rounded text-xs font-bold shadow transition text-white";
+                btnFree.className = "bg-gray-700 px-3 py-1 rounded text-xs font-bold shadow transition text-gray-400";
+                hint.innerText = "Режим: Автоматическое построение очереди по точкам.";
+                targetShopId = null;
+            } else {
+                btnFree.className = "bg-purple-600 px-3 py-1 rounded text-xs font-bold shadow transition text-white";
+                btnAuto.className = "bg-gray-700 px-3 py-1 rounded text-xs font-bold shadow transition text-gray-400";
+                hint.innerText = "Режим: Нажмите на магазин на карте или в списке для построения пути.";
+            }
+            updateRouteLine();
+        }
+
+        function selectTargetShop(id) {
+            targetShopId = id;
+            const order = orders.find(o => o.id === id);
+            if (order) {
+                highlightOrderCard(id);
+                updateRouteLine();
+            }
+        }
+
+        function highlightOrderCard(id) {
+            const el = document.getElementById(`card-${id}`);
+            if (el) {
+                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                el.classList.add('ring-2', 'ring-purple-500');
+                setTimeout(() => el.classList.remove('ring-2', 'ring-purple-500'), 1500);
+            }
+        }
+
+        function updateRouteLine() {
+            if (polyline) map.removeLayer(polyline);
+            if (!currentDriverPos) return;
+
+            let coordsToDraw = [];
+
+            if (navMode === 'auto') {
+                const activeOrders = orders.filter(o => !o.isDelivered);
+                if (activeOrders.length > 0) {
+                    coordsToDraw = [currentDriverPos, ...activeOrders.map(o => o.coordinates)];
+                }
+            } else if (navMode === 'free' && targetShopId) {
+                const targetOrder = orders.find(o => o.id === targetShopId && !o.isDelivered);
+                if (targetOrder) {
+                    coordsToDraw = [currentDriverPos, targetOrder.coordinates];
+                }
+            }
+
+            if (coordsToDraw.length > 1) {
+                polyline = L.polyline(coordsToDraw, { color: '#8b5cf6', weight: 4, dashArray: '6, 8' }).addTo(map);
+            }
+        }
+
+        function renderOrders() {
+            const list = document.getElementById('orders-list');
+            const sorted = [...orders].sort((a, b) => a.isDelivered - b.isDelivered);
+
+            list.innerHTML = sorted.map((order, index) => `
+                <div id="card-${order.id}" class="bg-gray-800 p-4 rounded-lg mb-3 shadow border ${order.isDelivered ? 'border-green-600 opacity-50' : 'border-gray-700'}">
+                    <div class="flex justify-between items-start mb-2">
+                        <div>
+                            <h2 class="font-bold text-lg ${order.isDelivered ? 'text-green-500' : 'text-blue-400'} cursor-pointer" onclick="selectTargetShop(${order.id})">
+                                ${index + 1}. ${order.shopName} 📍
+                            </h2>
+                            <p class="text-sm text-gray-400">📞 Магазин: ${order.phone || 'Нет'}</p>
+                        </div>
+                        ${!order.isDelivered ? 
+                            `<button onclick="markDelivered(${order.id})" class="bg-green-600 hover:bg-green-500 px-4 py-2 rounded font-bold shadow-lg text-sm">Сдано</button>` : 
+                            `<span class="text-green-500 font-bold">✅ Доставлено</span>`
+                        }
+                    </div>
+                    
+                    <div class="bg-gray-700 p-2 rounded mt-2 text-sm text-gray-300">
+                        <ul class="list-disc list-inside">
+                            ${order.items.map(i => `<li>${i.name}: <b>${i.quantity}</b></li>`).join('')}
+                        </ul>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function markDelivered(id) {
+            const order = orders.find(o => o.id === id);
+            if (order) {
+                order.isDelivered = true;
+                if (targetShopId === id) targetShopId = null;
+                markers[id].setStyle({ fillColor: "#10b981" });
+                renderOrders();
+                updateRouteLine();
+            }
+        }
+
+        checkAuth();
+    </script>
+</body>
+</html>
