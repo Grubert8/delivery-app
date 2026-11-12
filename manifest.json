@@ -1,0 +1,13 @@
+{
+  "background_color": "#ffffff",
+  "dir": "ltr",
+  "display": "standalone",
+  "name": "Навигатор Доставщика",
+  "orientation": "any",
+  "scope": "/",
+  "short_name": "Навигатор",
+  "start_url": "/",
+  "theme_color": "#ffffff",
+  "id": "Приложение для логистики",
+  "description": "доставка"
+}
